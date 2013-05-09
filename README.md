@@ -1,5 +1,7 @@
-File Provided
--------------
+TF-IDF document clustering
+
+File
+----
 
 * process_corpus.rb - a ruby script that reads in the article data from data.json
 				    and processes if for analysis in R

@@ -1,0 +1,242 @@
+#!/usr/bin/ruby
+
+class PrepJson
+
+	require "pp"
+	require "rubygems"
+	require "json"
+	
+	#new initialise all the things AND read in the raw data
+	def initialize(input)
+		@fileName = input
+		@parsedData = ''
+		@cleanedData = ''
+		#This holds the IFD value for each word
+		@hBagOWords = Hash.new
+		#this vector thing could be an array but I kind of like 
+		#using indexed hashes
+		@hVectors = Hash.new
+		@aDistanceMatrix = []
+		
+		if File.exists? @fileName
+			fhInput = File.open(@fileName, 'r')
+			#Just grab the whole file into a variable as we're not
+			#handling Gbs of data
+			jsonContents = fhInput.read
+			@parsedData = JSON.parse jsonContents
+			#pp @parsedData
+		else
+			puts "No json input found"
+			exit;
+		end
+	end
+	
+	#here we'll take out all special characters and numbers, replacing
+	#them with spaces which we'll ignore later
+	def stripChars
+		@parsedData.keys.sort.each do |name|
+			@parsedData[name].each do |article|	
+				#do some cleaning, should probably refactor to some
+				#private class. Surely a ruby class to do this kind of
+				#structured text cleaning exists (see also R).
+				#apols to the coding codes for this horrible code duplication
+				article["title"].downcase!
+				#lose the newlines
+				article["title"].gsub!(/\\n/, ' ')
+				#lose the date abbreviations
+				article["title"].gsub!(/\d+s/, '')
+				#lose the possesives
+				article["title"].gsub!(/'s/, '')
+				#lose anything that isn't an ascii text character or space
+				#probably a bit extreme but we'll see
+				article["title"].gsub!(/[^\s+A-Za-z]/, ' ')
+				#lose trivial plurals
+				article["title"].gsub!(/s\b/, '')
+				#lastly ensure that spaces are just singles
+				article["title"].gsub!(/\s+/, ' ')
+				
+				
+				article["content"].downcase!
+				#lose the newlines
+				article["content"].gsub!(/\\n/, ' ')
+				#lose the date abbreviations
+				article["content"].gsub!(/\d+s/, '')
+				#lose the possesives
+				article["content"].gsub!(/'s/, '')
+				#lose anything that isn't a text character or space
+				article["content"].gsub!(/[^\s+A-Za-z]/, ' ')
+				#lose trivial plurals
+				article["content"].gsub!(/s\b/, '')
+				#lastly ensure that spaces are just singles
+				article["content"].gsub!(/\s+/, ' ')
+				
+			end
+		end
+		#pp @parsedData
+	end
+	
+	#loop through the documents finding all words and calculate the IDF
+	def calculateIDF
+		docCount = 0
+		
+		@parsedData.keys.sort.each do |name|
+			
+			docCount = @parsedData[name].length
+			
+			@parsedData[name].each do |article|
+				title_tokens = article["title"].split(/\s+/)
+				content_tokens = article["content"].split(/\s+/)
+				
+				#here we also add all 2-tuples to the word bag, bit hacky
+				#and I am somewhat ashamed
+				title_tuples = article["title"].scan(/\w+\s\w+/)
+				content_tuples = article["content"].scan(/\w+\s\w+/)
+				article["title"].gsub!(/^\w+\s+/, '')
+				article["content"].gsub!(/^\w+\s+/, '')
+				title_tuples_shifted = article["title"].scan(/\w+\s\w+/)
+				content_tuples_shifted = article["content"].scan(/\w+\s\w+/)
+				
+				unique_list = (title_tokens + content_tokens + title_tuples + content_tuples+ title_tuples_shifted + content_tuples_shifted).uniq
+				
+				#pp unique_list
+				
+				unique_list.each do |word|
+					#catch any blank word that the text processing may have 
+					#generated and drop any 1 or 2 letter words
+					if word.length <= 1
+						next
+					end
+					
+					if @hBagOWords.has_key?(word)
+						@hBagOWords[word]+=1
+					else
+						@hBagOWords[word]=1
+					end
+				end
+				
+			end
+		end
+		
+		#replace counts with idf
+		#taking the log here, although may not be necessary with such a small
+		#corpus
+		@hBagOWords.keys.sort.each do |word|
+			count = @hBagOWords[word]
+			@hBagOWords[word] = Math.log(docCount/count)
+		end
+		#pp @parsedData
+	end
+	
+	#loop through our document set and build a vector (simple array) for each 
+	#doc and calculate the full TF-IDF as we go. This is somewhat unwieldy and 
+	#a better (quicker?) solution would have been to throw the text in to a 
+	#SQLite or similar db.
+	def buildVectors
+		#loop through the articles
+		@parsedData.keys.sort.each do |name|
+			@parsedData[name].each_with_index do |article, index|
+				title_tokens = article["title"].split(/\s+/)
+				content_tokens = article["content"].split(/\s+/)
+				allWords = title_tokens +content_tokens
+				
+				docSize = allWords.length
+				#now loop through the words, sort them to force the
+				#same vector order
+				articleVector = []
+				@hBagOWords.keys.sort.each do |word|
+					wordCount = article["title"].scan(word).size
+					wordCount+= article["content"].scan(word).size
+					
+					#calculate the tf-idf here
+					tf = wordCount.to_f/docSize.to_f
+					tfidf = tf * @hBagOWords[word]
+					articleVector.push(tfidf)
+				end
+								
+				@hVectors[index] = articleVector
+			end
+		end
+		return @hVectors
+	end
+	
+	#does what it says on the tin
+	def calculateDistanceMatrix
+		#do all against all comparison to build up the cosine distance matrix
+		@hVectors.keys.sort.each do |index|
+			
+			aSimScores = []
+			@hVectors.keys.sort.each do |index2|
+				#if index == index2 #don't compare self to self
+				#	aSimScores.push(1)
+				#end
+				
+				sim_score = cosine_similarity(@hVectors[index],@hVectors[index2])
+				aSimScores.push(sim_score)
+			end
+			@aDistanceMatrix.push(aSimScores)
+		end
+		
+		return @aDistanceMatrix
+	end	
+	
+	
+	#cosine similarity code from (shorter/smarter/nicer than I would have
+	#written)
+	#http://bionicspirit.com/blog/2012/01/16/cosine-similarity-euclidean-distance.html
+	def dot_product(a, b)
+  		products = a.zip(b).map{|a, b| a * b}
+  		products.inject(0) {|s,p| s + p}
+		end
+
+	def magnitude(point)
+		squares = point.map{|x| x ** 2}
+		Math.sqrt(squares.inject(0) {|s, c| s + c})
+	end
+
+	def cosine_similarity(a, b)
+  		dot_product(a, b) / (magnitude(a) * magnitude(b))
+	end
+
+
+
+end
+
+input = ARGV[0]
+puts "Reading Data"
+json_data = PrepJson.new(input)
+puts "Munging Strings"
+json_data.stripChars
+puts "Calculating IDF"
+json_data.calculateIDF
+puts "Calculating TF-IDF"
+hVectors = json_data.buildVectors
+puts "Outputting document vectors"
+#was planning on using ruby's ai4r package but the documentation is very
+#poor and the kmeans clustering only appears to do 2D vectors. Left the code
+#in above for reference
+#distanceMatrix = json_data.calculateDistanceMatrix
+
+
+fhVectOut = File.open("vectors.csv", 'w')
+initVector = hVectors[0]
+#write the header labels for R
+vectLength = initVector.length
+
+line = ""
+for i in 1..vectLength
+	line+=i.to_s+"," 
+end
+line.chop!
+fhVectOut.syswrite(line+"\n")
+
+
+hVectors.keys.sort.each do |key|
+
+	line = ""
+	hVectors[key].each do |tfidf|
+		line+=tfidf.to_s+","
+	end
+	line.chop!
+	fhVectOut.syswrite(line+"\n")
+end
+
